@@ -12,9 +12,7 @@ shmmqueue::CShmRWlock::CShmRWlock(key_t iKey) {
 struct sembuf 是一个结构体，用于描述一个对信号量的操作。它包含三个字段：
     semnum：信号量集合中的信号量编号，0代表第1个信号量,1代表第二个信号量等等。
     sem_op：信号量操作。
-             如果它的值大于0，那么这个值会被加到当前信号量的值上（这通常被称为"V"操作）。
-             如果它的值小于0，那么这个值会被从当前信号量的值中减去（这通常被称为"P"操作）。
-             如果信号量的当前值小于 sem_op 的绝对值，那么 semop 会阻塞，直到资源可用。
+            一个正数（增加信号量值），负数（减少信号量值），或者是 0（等待信号量变为 0）。
     sem_flg：操作标志。可能的值为 SEM_UNDO，IPC_NOWAIT。
             IPC_NOWAIT 设置信号量操作不等待
             SEM_UNDO  选项会让内核记录一个与调用进程相关的UNDO记录，
@@ -27,9 +25,21 @@ int shmmqueue::CShmRWlock::Rlock() const {
      **/
     //    {0, 0, SEM_UNDO}：等待第一个信号量（写信号量）变为0。这意味着在获取读锁之前，需要等待没有其他的写操作。
     //    {1, 1, SEM_UNDO}：把第二个信号量（读信号量）加一。这表示当前有一个读操作正在进行。
-    struct sembuf sops[2]={{0,0,SEM_UNDO},
+
+//    struct sembuf sops[2]={{0,0,SEM_UNDO},
+//                           {1,1,SEM_UNDO}};
+//    size_t nsops=2;
+
+/**
+ * 上面实现中 读锁的实现是错误的，这里读锁的实现应该不能是多个读锁可以同时持有，
+ * 因为读索引需要互斥使用，否则读的过程中读索引可能会被修改，导致读取错误。
+ */
+
+    struct sembuf sops[3]={{0,0,SEM_UNDO},
+                           {1,0,SEM_UNDO},
                            {1,1,SEM_UNDO}};
-    size_t nsops=2;
+    size_t nsops=3;
+
     int ret;
     //semop会顺序执行sops中定义的操作
     do{
@@ -52,9 +62,10 @@ int shmmqueue::CShmRWlock::UnRlock() const {
 /// 尝试获得读锁
 /// \return fasle--尝试失败， true--成功
 bool shmmqueue::CShmRWlock::TryRlock() const {
-    struct sembuf sops[2]={{0,0,SEM_UNDO|IPC_NOWAIT},
-                           {1,1,SEM_UNDO|IPC_NOWAIT}};
-    size_t nsops=2;
+    struct sembuf sops[3]={{0,0,SEM_UNDO},
+                           {1,0,SEM_UNDO},
+                           {1,1,SEM_UNDO}};
+    size_t nsops=3;
     int iRet= semop(m_iSemId,&sops[0],nsops);
     if(iRet==-1){
         if(errno==EAGAIN){ //资源暂时不可用
@@ -147,15 +158,16 @@ void shmmqueue::CShmRWlock::init(key_t iKey) {
         arg.array=&array[0];
         //将所有信号量设置为0
         if(semctl(iSemID,0,SETALL,arg)==-1){
-            throw std::runtime_error("semctlt error: "+std::string(strerror(errno)));
+            throw std::runtime_error("semctl error: "+std::string(strerror(errno)));
         }
     }
     else{
         //如果生成信号量集失败，判断是否已经存在
+        //不存在
         if(errno!=EEXIST){
-            throw std::runtime_error("sem has wxist error: "+ std::string (strerror(errno)));
+            throw std::runtime_error("sem has exist error: "+ std::string (strerror(errno)));
         }
-        //连接信号量
+        //存在，连接信号量
         if((iSemID=semget(iKey,2,0666))==-1){
             throw std::runtime_error("semget error: "+ std::string (strerror(errno)));
         }
