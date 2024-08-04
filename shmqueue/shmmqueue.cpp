@@ -58,7 +58,7 @@ int CMessageQueue::SendMessage(BYTE *message, MESS_SIZE_TYPE length)
     }
 
     CSafeShmWlock tmLock;
-    //修改共享内存写锁
+    //修改共享内存写锁，获取写锁
     if (IsWriteLock() && m_pWriteLock) {
         tmLock.InitLock(m_pWriteLock);
     }
@@ -84,7 +84,7 @@ int CMessageQueue::SendMessage(BYTE *message, MESS_SIZE_TYPE length)
     unsigned int writePos = m_stMemTrunk->m_iWrite;
     for (MESS_SIZE_TYPE i = 0; i < sizeof(usInLength); i++) {
         messageQueue[writePos] = messageLen[i];  // 拷贝 Code 的长度
-        writePos = (writePos + 1) & (m_stMemTrunk->m_iSize - 1);  // % 用于防止 Code 结尾的 idx 超出 codequeue
+        writePos = (writePos + 1) & (m_stMemTrunk->m_iSize - 1);  // % 用于防止 Code 结尾的 idx 超出 code queue
     }
 
     unsigned int tmpLen = SHM_MIN(usInLength, m_stMemTrunk->m_iSize - writePos);
@@ -99,11 +99,16 @@ int CMessageQueue::SendMessage(BYTE *message, MESS_SIZE_TYPE length)
     /*
     * Ensure that we add the bytes to the kfifo -before-
     * we update the fifo->in index.
-    * 数据写入完成修改m_iEnd，保证读端不会读到写入一半的数据
+    * 数据写入完成修改m_iWrite，保证读端不会读到写入一半的数据
     */
     __WRITE_BARRIER__;
+    if(writePos+usInLength>=m_stMemTrunk->m_iSize)
+    {
+        m_stMemTrunk->m_iWrite_num++;
+    }
     m_stMemTrunk->m_iWrite = (writePos + usInLength) & (m_stMemTrunk->m_iSize - 1);
     return (int) eQueueErrorCode::QUEUE_OK;
+    //析构函数释放写锁
 }
 ///
 /// \param outDataAddr
@@ -114,14 +119,14 @@ int CMessageQueue::GetMessage(BYTE *outDataAddr)
         return (int) eQueueErrorCode::QUEUE_PARAM_ERROR;
     }
 
-    CSafeShmWlock tmLock;
-    //修改共享内存写锁
+    CSafeShmRlock tmLock;
+    //修改共享内存写锁，获取写锁
     if (IsReadLock() && m_pReadLock) {
         tmLock.InitLock(m_pReadLock);
     }
 
-    int nTempMaxLength = GetDataSize();
-    if (nTempMaxLength <= 0) {
+    int nTempMaxLength =(int) GetDataSize();
+    if (nTempMaxLength == 0) {
         return (int) eQueueErrorCode::QUEUE_NO_MESSAGE;
     }
 
@@ -145,12 +150,12 @@ int CMessageQueue::GetMessage(BYTE *outDataAddr)
     }
 
     // 将数据长度回传
-    //取出的数据的长度实际有的数据长度，非法
+    //取出的数据的长度大于实际的数据长度，非法
     if (messLen > (int) (nTempMaxLength - sizeof(MESS_SIZE_TYPE)) ) {
-        printf("[%s:%d] ReadHeadMessage messLen illegal,messLen: %d,nTempMaxLength %d \n",
+        printf("[%s:%d] ReadHeadMessage messLen illegal,messLen: %zu,nTempMaxLength %d \n",
                __FILE__, __LINE__, messLen, nTempMaxLength);
         PrintTrunk();
-        m_stMemTrunk->m_iRead = m_stMemTrunk->m_iWrite;
+//        m_stMemTrunk->m_iRead = m_stMemTrunk->m_iWrite;
         return (int) eQueueErrorCode::QUEUE_DATA_SEQUENCE_ERROR;
     }
     //读数据
@@ -164,6 +169,11 @@ int CMessageQueue::GetMessage(BYTE *outDataAddr)
     }
 
     __WRITE_BARRIER__;
+    if(readPos+messLen>=m_stMemTrunk->m_iSize)
+    {
+        m_stMemTrunk->m_iRead_num++;
+    }
+
     m_stMemTrunk->m_iRead = (readPos + messLen) & (m_stMemTrunk->m_iSize - 1);
     return messLen;
 }
@@ -172,13 +182,15 @@ int CMessageQueue::GetMessage(BYTE *outDataAddr)
 
 void CMessageQueue::PrintTrunk()
 {
-    printf("Mem trunk address 0x%p,shmkey %d ,shmid %d, size %d, begin %d, end %d, queue module %hhu \n",
+    printf("Mem trunk address 0x%p,shmkey %d ,shmid %d, size %d, read %d (%d), write %d (%d), queue module %hhu \n",
            m_stMemTrunk,
            m_stMemTrunk->m_iShmKey,
            m_stMemTrunk->m_iShmId,
            m_stMemTrunk->m_iSize,
            m_stMemTrunk->m_iRead,
+           m_stMemTrunk->m_iRead_num,
            m_stMemTrunk->m_iWrite,
+           m_stMemTrunk->m_iWrite_num,
            static_cast<unsigned char>(m_stMemTrunk->m_eQueueModule));
 }
 
@@ -291,7 +303,7 @@ BYTE *CMessageQueue::CreateShareMem(key_t iKey, long vSize, enShmModule &shmModu
         shmModule = enShmModule::SHM_INIT;
     }
 
-    printf("Successfully alloced share memory block,[key= %d,shmId %d] size = %d \n", iKey, shmId, iTempShmSize);
+    printf("Successfully malloced share memory block,[key= %d,shmId %d] size = %d \n", iKey, shmId, iTempShmSize);
     //将标识符为shmId的共享内存段连接到当前进程的地址空间，并将连接的地址转换为BYTE*类型，然后赋值给tpShm。
     BYTE *tpShm = (BYTE *) shmat(shmId, NULL, 0);
 
@@ -347,7 +359,7 @@ bool CMessageQueue::IsPowerOfTwo(size_t size) {
 }
 
 
-//将size扩大到2^n
+///将size扩大到2^n
 size_t CMessageQueue::RoundupPowofTwo(size_t size) {
     if(IsPowerOfTwo(size)) return size;
     int pos=0;
